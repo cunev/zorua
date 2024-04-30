@@ -1,0 +1,25 @@
+{
+  "name": "@prismsh/intercept",
+  "version": "0.1.4",
+  "description": "This project was bootstrapped by [create-neon](https://www.npmjs.com/package/create-neon).",
+  "main": "index.ts",
+  "scripts": {
+    "build": "cargo-cp-artifact -nc intercept.node -- cargo build --message-format=json-render-diagnostics",
+    "build-debug": "npm run build --",
+    "build-release": "npm run build -- --release",
+    "install-native": "npm run build-release",
+    "test": "cargo test",
+    "dev": "bun run build && tsx watch test.ts"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "cargo-cp-artifact": "^0.1"
+  },
+  "dependencies": {
+    "@nut-tree/nut-js": "^3.1.2",
+    "@types/node": "^20.12.7",
+    "keysender": "^2.3.0",
+    "tsx": "^4.7.3"
+  }
+}

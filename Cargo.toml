@@ -1,0 +1,23 @@
+[package]
+name = "intercept"
+version = "0.1.0"
+license = "ISC"
+edition = "2018"
+exclude = ["intercept.node"]
+
+[lib]
+crate-type = ["cdylib"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+enigo = "0.2.0"
+lazy_static = "1.4.0"
+rdev = { version = "0.5.3", features = ["unstable_grab"] }
+widestring = "1.1.0"
+winapi = { version = "0.3.9", features = ["hidusage"]}
+
+[dependencies.neon]
+version = "0.10"
+default-features = false
+features = ["napi-6", 'channel-api', 'promise-api', 'task-api']
