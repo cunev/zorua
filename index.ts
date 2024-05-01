@@ -11,5 +11,5 @@ export function intercept() {
 }
 
 export function setVirtual(position: { x: number; y: number }) {
-  interceptModule.set_mouse_position(original.x, original.y);
+  interceptModule.set_mouse_position(position.x, position.y);
 }
