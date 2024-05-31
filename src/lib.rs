@@ -9,6 +9,9 @@ use std::{
     ptr::null_mut,
     sync::{Arc, Mutex},
 };
+use winapi::shared::minwindef::BOOL;
+use winapi::shared::windef::{HMONITOR, RECT};
+use winapi::um::wingdi::{GetDeviceCaps, LOGPIXELSX, LOGPIXELSY};
 use winapi::{
     shared::windef::{HHOOK, POINT},
     um::{
@@ -21,7 +24,9 @@ struct CallbackData {
 }
 
 use winapi::um::winuser::{
-    GetWindowLongPtrW, SetCursorPos, SetWindowLongPtrW, GWLP_USERDATA, MOUSE_MOVE_ABSOLUTE,
+    EnumDisplayMonitors, GetDC, GetMonitorInfoW, GetSystemMetrics, GetWindowLongPtrW,
+    MonitorFromWindow, ReleaseDC, SetCursorPos, SetWindowLongPtrW, GWLP_USERDATA, MONITORINFO,
+    MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MOUSE_MOVE_ABSOLUTE, SM_CXSCREEN, SM_CYSCREEN,
     WH_MOUSE_LL,
 };
 use winapi::{
@@ -89,7 +94,23 @@ unsafe fn proc_raw_input(l_param: LPARAM, callback_data: &mut CallbackData) -> b
             }
             if is_mouse_move_absolute(ri) {
                 let mouse = ri.data.mouse();
-                (callback_data.callback)(mouse.lLastX, mouse.lLastY, 'a');
+                let mut virtual_screen_rect = RECT {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                };
+
+                // Get screen resolution
+                get_virtual_screen_rect(&mut virtual_screen_rect);
+
+                // Transform to pixels
+                let x_pixel = (mouse.lLastX as f64 / 65535.0 * virtual_screen_rect.right as f64)
+                    .round() as i32;
+                let y_pixel = (mouse.lLastY as f64 / 65535.0 * virtual_screen_rect.bottom as f64)
+                    .round() as i32;
+
+                (callback_data.callback)(x_pixel, y_pixel, 'a');
                 res = true;
             }
         }
@@ -257,6 +278,48 @@ unsafe fn set_cursor_position(screen_x: i32, screen_y: i32) {
     SetCursorPos(screen_x, screen_y);
 }
 
+unsafe extern "system" fn monitor_enum_proc(
+    hmonitor: HMONITOR,
+    hdc: winapi::shared::windef::HDC,
+    rect: *mut RECT,
+    lparam: LPARAM,
+) -> BOOL {
+    let mut monitor_info: MONITORINFO = std::mem::zeroed();
+    monitor_info.cbSize = std::mem::size_of::<MONITORINFO>() as UINT;
+
+    if GetMonitorInfoW(hmonitor, &mut monitor_info) != 0 {
+        let rect_ptr = lparam as *mut RECT;
+        let monitor_rect = monitor_info.rcMonitor;
+
+        (*rect_ptr).left = (*rect_ptr).left.min(monitor_rect.left);
+        (*rect_ptr).top = (*rect_ptr).top.min(monitor_rect.top);
+        (*rect_ptr).right = (*rect_ptr).right.max(monitor_rect.right);
+        (*rect_ptr).bottom = (*rect_ptr).bottom.max(monitor_rect.bottom);
+    }
+
+    1 // Continue enumeration
+}
+
+unsafe fn get_virtual_screen_rect(rect: &mut RECT) {
+    let mut monitor_info: MONITORINFO = std::mem::zeroed();
+    monitor_info.cbSize = std::mem::size_of::<MONITORINFO>() as UINT;
+
+    // Initialize the rect to cover at least one monitor
+    if GetMonitorInfoW(
+        MonitorFromWindow(null_mut(), MONITOR_DEFAULTTOPRIMARY),
+        &mut monitor_info,
+    ) != 0
+    {
+        *rect = monitor_info.rcMonitor;
+    }
+    // Enumerate all monitors and accumulate their dimensions
+    EnumDisplayMonitors(
+        null_mut(),
+        null_mut(),
+        Some(monitor_enum_proc),
+        rect as *mut RECT as LPARAM,
+    );
+}
 unsafe extern "system" fn raw_callback(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 && wparam as DWORD == WM_MOUSEMOVE {
         return 1;

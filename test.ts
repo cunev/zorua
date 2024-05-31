@@ -4,5 +4,5 @@ import { intercept, original } from ".";
 intercept();
 
 setInterval(() => {
-  console.log(original);
+  // console.log(original);
 });
