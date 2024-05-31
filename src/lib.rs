@@ -17,11 +17,12 @@ use winapi::{
     },
 };
 struct CallbackData {
-    callback: Box<dyn FnMut(i32, i32)>,
+    callback: Box<dyn FnMut(i32, i32, char)>,
 }
 
 use winapi::um::winuser::{
-    GetWindowLongPtrW, SetCursorPos, SetWindowLongPtrW, GWLP_USERDATA, WH_MOUSE_LL,
+    GetWindowLongPtrW, SetCursorPos, SetWindowLongPtrW, GWLP_USERDATA, MOUSE_MOVE_ABSOLUTE,
+    WH_MOUSE_LL,
 };
 use winapi::{
     shared::basetsd::LONG_PTR,
@@ -66,6 +67,10 @@ unsafe fn proc_raw_input(l_param: LPARAM, callback_data: &mut CallbackData) -> b
         ri.header.dwType == RIM_TYPEMOUSE && ri.data.mouse().usFlags == MOUSE_MOVE_RELATIVE
     };
 
+    let is_mouse_move_absolute = |ri: RAWINPUT| {
+        ri.header.dwType == RIM_TYPEMOUSE && (ri.data.mouse().usFlags & MOUSE_MOVE_ABSOLUTE) != 0
+    };
+
     let get_raw_input_data = |data: LPVOID, size: PUINT| {
         GetRawInputData(l_param as HRAWINPUT, RID_INPUT, data, size, *CB_SIZE_HEADER)
     };
@@ -79,7 +84,12 @@ unsafe fn proc_raw_input(l_param: LPARAM, callback_data: &mut CallbackData) -> b
             let ri = std::ptr::read(data as *const RAWINPUT);
             if is_mouse_move_relative(ri) {
                 let mouse = ri.data.mouse();
-                (callback_data.callback)(mouse.lLastX, mouse.lLastY);
+                (callback_data.callback)(mouse.lLastX, mouse.lLastY, 'r');
+                res = true;
+            }
+            if is_mouse_move_absolute(ri) {
+                let mouse = ri.data.mouse();
+                (callback_data.callback)(mouse.lLastX, mouse.lLastY, 'a');
                 res = true;
             }
         }
@@ -185,15 +195,21 @@ fn start_raw_input(mut cx: FunctionContext) -> JsResult<JsUndefined> {
                     ptr::null_mut(),
                 );
                 let data = Box::new(CallbackData {
-                    callback: Box::new(move |x, y| {
+                    callback: Box::new(move |x, y, mode| {
                         let func = Arc::clone(&func);
                         channel.send(move |mut cx| {
                             let func = func.lock().unwrap();
                             let this = cx.undefined();
                             let jsx = cx.number(x);
                             let jsy = cx.number(y);
+                            let mode = cx.string(mode.to_string());
+
                             let callback = func.to_inner(&mut cx);
-                            let _ = callback.call(&mut cx, this, &[jsx.upcast(), jsy.upcast()]);
+                            let _ = callback.call(
+                                &mut cx,
+                                this,
+                                &[jsx.upcast(), jsy.upcast(), mode.upcast()],
+                            );
                             Ok(())
                         });
                     }),

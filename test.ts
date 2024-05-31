@@ -1,6 +1,8 @@
 import { mouse } from "@nut-tree/nut-js";
-import { intercept } from ".";
+import { intercept, original } from ".";
 
-intercept((x, y) => {
-  console.log(x);
+intercept();
+
+setInterval(() => {
+  console.log(original);
 });

@@ -3,9 +3,14 @@ const interceptModule = _req("./intercept.node");
 
 export const original = { x: 0, y: 0 };
 export function intercept() {
-  interceptModule.start_raw_input((deltaX, deltaY) => {
-    original.x += deltaX;
-    original.y += deltaY;
+  interceptModule.start_raw_input((deltaX, deltaY, mode) => {
+    if (mode == "a") {
+      original.x = deltaX / 65535;
+      original.y = deltaY / 65535;
+    } else {
+      original.x += deltaX;
+      original.y += deltaY;
+    }
   });
   interceptModule.block_input();
 }
