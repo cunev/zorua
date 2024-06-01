@@ -70,6 +70,13 @@ lazy_static! {
     static ref Y: Arc<AtomicI32> = Arc::new(AtomicI32::new(100));
 }
 
+static mut VIRTUAL_SCREEN_RECT: RECT = RECT {
+    left: 0,
+    top: 0,
+    right: 0,
+    bottom: 0,
+};
+
 unsafe fn proc_raw_input(l_param: LPARAM, callback_data: &mut CallbackData) -> bool {
     let mut pcb_size = 0;
 
@@ -99,20 +106,14 @@ unsafe fn proc_raw_input(l_param: LPARAM, callback_data: &mut CallbackData) -> b
             }
             if is_mouse_move_absolute(ri) {
                 let mouse = ri.data.mouse();
-                let mut virtual_screen_rect = RECT {
-                    left: 0,
-                    top: 0,
-                    right: 0,
-                    bottom: 0,
-                };
 
-                // Get screen resolution
-                get_virtual_screen_rect(&mut virtual_screen_rect);
+                if (VIRTUAL_SCREEN_RECT.right == 0 && VIRTUAL_SCREEN_RECT.bottom == 0) {
+                    get_virtual_screen_rect(&mut VIRTUAL_SCREEN_RECT);
+                }
 
-                // Transform to pixels
-                let x_pixel = (mouse.lLastX as f64 / 65535.0 * virtual_screen_rect.right as f64)
+                let x_pixel = (mouse.lLastX as f64 / 65535.0 * VIRTUAL_SCREEN_RECT.right as f64)
                     .round() as i32;
-                let y_pixel = (mouse.lLastY as f64 / 65535.0 * virtual_screen_rect.bottom as f64)
+                let y_pixel = (mouse.lLastY as f64 / 65535.0 * VIRTUAL_SCREEN_RECT.bottom as f64)
                     .round() as i32;
 
                 (callback_data.callback)(x_pixel, y_pixel, 'a');
