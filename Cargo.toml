@@ -13,9 +13,10 @@ crate-type = ["cdylib"]
 [dependencies]
 enigo = "0.2.0"
 lazy_static = "1.4.0"
+ntapi = "0.4.1"
 rdev = { version = "0.5.3", features = ["unstable_grab"] }
 widestring = "1.1.0"
-winapi = { version = "0.3.9", features = ["hidusage"]}
+winapi = { version = "0.3.9", features = ["hidusage", "winbase", "powerbase", "processthreadsapi"]}
 
 [dependencies.neon]
 version = "0.10"

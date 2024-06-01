@@ -1,8 +1,11 @@
-import { mouse } from "@nut-tree/nut-js";
-import { intercept, original } from ".";
+import { disableThrottling, intercept, original } from ".";
 
 intercept();
 
+let lastDate = Date.now();
+disableThrottling();
 setInterval(() => {
+  console.log(Date.now() - lastDate);
+  lastDate = Date.now();
   // console.log(original);
 });

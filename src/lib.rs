@@ -1,5 +1,7 @@
 use lazy_static::lazy_static;
 use neon::prelude::*;
+use ntapi::ntexapi::{NtQueryTimerResolution, NtSetTimerResolution};
+use ntapi::ntpsapi::{NtSetInformationProcess, ThreadPowerThrottlingState};
 use std::alloc::{alloc, dealloc, Layout};
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,8 +11,11 @@ use std::{
     ptr::null_mut,
     sync::{Arc, Mutex},
 };
-use winapi::shared::minwindef::BOOL;
+use winapi::shared::minwindef::{BOOL, ULONG};
+use winapi::shared::ntdef::TRUE;
 use winapi::shared::windef::{HMONITOR, RECT};
+use winapi::um::processthreadsapi::{GetCurrentProcess, SetPriorityClass, SetProcessInformation};
+use winapi::um::winbase::HIGH_PRIORITY_CLASS;
 use winapi::um::wingdi::{GetDeviceCaps, LOGPIXELSX, LOGPIXELSY};
 use winapi::{
     shared::windef::{HHOOK, POINT},
@@ -355,8 +360,50 @@ fn block_input(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
+const PROCESS_POWER_THROTTLING_CURRENT_VERSION: ULONG = 1;
+const PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION: ULONG = 0x00000001;
+const PROCESS_INFORMATION_CLASS_PROCESS_POWER_THROTTLING: ULONG = 0x29; // Value depends on actual definition in Windows headers
+#[repr(C)]
+struct ProcessPowerThrottlingState {
+    version: ULONG,
+    control_mask: ULONG,
+    state_mask: ULONG,
+}
+
+fn disable_throttling(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    unsafe {
+        SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+
+        let mut state = ProcessPowerThrottlingState {
+            version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            control_mask: PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+            state_mask: 0,
+        };
+
+        SetProcessInformation(
+            GetCurrentProcess(),
+            PROCESS_INFORMATION_CLASS_PROCESS_POWER_THROTTLING,
+            &mut state as *mut _ as _,
+            std::mem::size_of::<ProcessPowerThrottlingState>() as DWORD,
+        );
+
+        let mut current_resolution = 0;
+        let mut maximum_resolution = 0;
+        let mut minimum_resolution = 0;
+
+        NtQueryTimerResolution(
+            &mut minimum_resolution,
+            &mut maximum_resolution,
+            &mut current_resolution,
+        );
+        NtSetTimerResolution(maximum_resolution, TRUE, &mut current_resolution);
+        Ok(cx.undefined())
+    }
+}
+
 #[neon::main]
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
+    cx.export_function("disable_throttling", disable_throttling)?;
     cx.export_function("start_raw_input", start_raw_input)?;
     cx.export_function("block_input", block_input)?;
     cx.export_function("set_mouse_position", set_mouse_position)?;
