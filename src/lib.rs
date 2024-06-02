@@ -29,10 +29,10 @@ struct CallbackData {
 }
 
 use winapi::um::winuser::{
-    EnumDisplayMonitors, GetDC, GetMonitorInfoW, GetSystemMetrics, GetWindowLongPtrW,
-    MonitorFromWindow, ReleaseDC, SetCursorPos, SetWindowLongPtrW, GWLP_USERDATA, MONITORINFO,
+    GetDC, GetSystemMetrics, GetWindowLongPtrW,
+    ReleaseDC, SetCursorPos, SetWindowLongPtrW, GWLP_USERDATA, MONITORINFO,
     MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MOUSE_MOVE_ABSOLUTE, SM_CXSCREEN, SM_CYSCREEN,
-    WH_MOUSE_LL,
+    WH_MOUSE_LL, MSLLHOOKSTRUCT
 };
 use winapi::{
     shared::basetsd::LONG_PTR,
@@ -48,9 +48,9 @@ use winapi::{
         libloaderapi::GetModuleHandleW,
         winuser::{
             ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DispatchMessageW,
-            GetMessageW, GetRawInputData, RegisterClassExW, RegisterRawInputDevices,
-            RegisterWindowMessageW, TranslateMessage, HRAWINPUT, LPMSG, MOUSE_MOVE_RELATIVE, MSG,
-            RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEMOUSE,
+            GetMessageW, RegisterClassExW,
+            RegisterWindowMessageW, TranslateMessage, LPMSG, MOUSE_MOVE_RELATIVE, MSG,
+            RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEMOUSE,
             WM_INPUT, WM_QUERYENDSESSION, WNDCLASSEXW,
         },
     },
@@ -60,14 +60,18 @@ use widestring::U16CString;
 
 const MSGFLT_ALLOW: DWORD = 1;
 
+//Thread safe thingy
+struct SafeHWND(HWND);
+unsafe impl Send for SafeHWND {}
+
 lazy_static! {
     static ref WM_TASKBAR_CREATED: UINT =
         unsafe { RegisterWindowMessageW(U16CString::from_str("TaskbarCreated").unwrap().as_ptr()) };
-    static ref CB_SIZE_HEADER: UINT = mem::size_of::<RAWINPUTHEADER>() as UINT;
     static ref CLASS_NAME: U16CString = U16CString::from_str("W10Wheel/R_WM").unwrap();
     static ref STOP_FLAG: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     static ref X: Arc<AtomicI32> = Arc::new(AtomicI32::new(100));
     static ref Y: Arc<AtomicI32> = Arc::new(AtomicI32::new(100));
+    static ref GLOBAL_HWND: Mutex<SafeHWND> = Mutex::new(SafeHWND(ptr::null_mut()));
 }
 
 static mut VIRTUAL_SCREEN_RECT: RECT = RECT {
@@ -76,87 +80,6 @@ static mut VIRTUAL_SCREEN_RECT: RECT = RECT {
     right: 0,
     bottom: 0,
 };
-
-unsafe fn proc_raw_input(l_param: LPARAM, callback_data: &mut CallbackData) -> bool {
-    let mut pcb_size = 0;
-
-    let is_mouse_move_relative = |ri: RAWINPUT| {
-        ri.header.dwType == RIM_TYPEMOUSE && ri.data.mouse().usFlags == MOUSE_MOVE_RELATIVE
-    };
-
-    let is_mouse_move_absolute = |ri: RAWINPUT| {
-        ri.header.dwType == RIM_TYPEMOUSE && (ri.data.mouse().usFlags & MOUSE_MOVE_ABSOLUTE) != 0
-    };
-
-    let get_raw_input_data = |data: LPVOID, size: PUINT| {
-        GetRawInputData(l_param as HRAWINPUT, RID_INPUT, data, size, *CB_SIZE_HEADER)
-    };
-
-    if get_raw_input_data(ptr::null_mut(), &mut pcb_size) == 0 {
-        let layout = Layout::from_size_align(pcb_size as usize, 1).unwrap();
-        let data = alloc(layout);
-        let mut res = false;
-
-        if get_raw_input_data(data as LPVOID, &mut pcb_size) == pcb_size {
-            let ri = std::ptr::read(data as *const RAWINPUT);
-            if is_mouse_move_relative(ri) {
-                let mouse = ri.data.mouse();
-                (callback_data.callback)(mouse.lLastX, mouse.lLastY, 'r');
-                res = true;
-            }
-            if is_mouse_move_absolute(ri) {
-                let mouse = ri.data.mouse();
-
-                if (VIRTUAL_SCREEN_RECT.right == 0 && VIRTUAL_SCREEN_RECT.bottom == 0) {
-                    get_virtual_screen_rect(&mut VIRTUAL_SCREEN_RECT);
-                }
-
-                let x_pixel = (mouse.lLastX as f64 / 65535.0 * VIRTUAL_SCREEN_RECT.right as f64)
-                    .round() as i32;
-                let y_pixel = (mouse.lLastY as f64 / 65535.0 * VIRTUAL_SCREEN_RECT.bottom as f64)
-                    .round() as i32;
-
-                (callback_data.callback)(x_pixel, y_pixel, 'a');
-                res = true;
-            }
-        }
-
-        dealloc(data, layout);
-        return res;
-    }
-
-    false
-}
-
-unsafe extern "system" fn window_proc(
-    hwnd: HWND,
-    msg: UINT,
-    w_param: WPARAM,
-    l_param: LPARAM,
-) -> LRESULT {
-    set_cursor_position(X.load(Ordering::SeqCst), Y.load(Ordering::SeqCst));
-    match msg {
-        WM_INPUT => {
-            let mut callback_data =
-                Box::from_raw(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut CallbackData);
-            if proc_raw_input(l_param, &mut callback_data) {
-                Box::into_raw(callback_data);
-                return 0;
-            }
-            Box::into_raw(callback_data);
-        }
-        WM_QUERYENDSESSION => {
-            return 0;
-        }
-        _ => {
-            if msg == *WM_TASKBAR_CREATED {
-                return 0;
-            }
-        }
-    };
-
-    DefWindowProcW(hwnd, msg, w_param, l_param)
-}
 
 unsafe fn message_loop(msg: LPMSG) {
     loop {
@@ -168,6 +91,15 @@ unsafe fn message_loop(msg: LPMSG) {
         DispatchMessageW(msg);
         thread::sleep(time::Duration::from_millis(1))
     }
+}
+
+unsafe extern "system" fn window_proc(
+    hwnd: HWND,
+    msg: UINT,
+    w_param: WPARAM,
+    l_param: LPARAM,
+) -> LRESULT {
+    DefWindowProcW(hwnd, msg, w_param, l_param)
 }
 
 fn make_window_class(h_instance: HINSTANCE) -> WNDCLASSEXW {
@@ -187,16 +119,7 @@ fn make_window_class(h_instance: HINSTANCE) -> WNDCLASSEXW {
     }
 }
 
-fn make_raw_input_device(hwnd: HWND) -> RAWINPUTDEVICE {
-    RAWINPUTDEVICE {
-        usUsagePage: HID_USAGE_PAGE_GENERIC,
-        usUsage: HID_USAGE_GENERIC_MOUSE,
-        dwFlags: RIDEV_INPUTSINK,
-        hwndTarget: hwnd,
-    }
-}
-
-fn start_raw_input(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+fn set_callback(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let func = cx.argument::<JsFunction>(0)?.root(&mut cx);
     let channel = cx.channel();
     let func = Arc::new(Mutex::new(func));
@@ -221,6 +144,12 @@ fn start_raw_input(mut cx: FunctionContext) -> JsResult<JsUndefined> {
                     ptr::null_mut(),
                     ptr::null_mut(),
                 );
+                
+                {
+                    let mut global_hwnd = GLOBAL_HWND.lock().unwrap();
+                    global_hwnd.0 = hwnd;
+                }
+
                 let data = Box::new(CallbackData {
                     callback: Box::new(move |x, y, mode| {
                         let func = Arc::clone(&func);
@@ -251,14 +180,6 @@ fn start_raw_input(mut cx: FunctionContext) -> JsResult<JsUndefined> {
                     ptr::null_mut(),
                 );
 
-                let rid = make_raw_input_device(hwnd);
-                let mut rid_array = vec![rid];
-                RegisterRawInputDevices(
-                    rid_array.as_mut_ptr(),
-                    1,
-                    mem::size_of::<RAWINPUTDEVICE>() as UINT,
-                );
-
                 let layout = Layout::new::<MSG>();
                 let msg = alloc(layout);
                 message_loop(msg as LPMSG);
@@ -274,66 +195,29 @@ fn set_mouse_position(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let a1 = cx.argument::<JsNumber>(0)?.value(&mut cx) as i32;
     let a2 = cx.argument::<JsNumber>(1)?.value(&mut cx) as i32;
 
-    X.store(a1, Ordering::SeqCst);
-    Y.store(a2, Ordering::SeqCst);
+    unsafe {
+        SetCursorPos(a1, a2);
+    }
 
     Ok(cx.undefined())
 }
 
-unsafe fn set_cursor_position(screen_x: i32, screen_y: i32) {
-    SetCursorPos(screen_x, screen_y);
-}
-
-unsafe extern "system" fn monitor_enum_proc(
-    hmonitor: HMONITOR,
-    hdc: winapi::shared::windef::HDC,
-    rect: *mut RECT,
-    lparam: LPARAM,
-) -> BOOL {
-    let mut monitor_info: MONITORINFO = std::mem::zeroed();
-    monitor_info.cbSize = std::mem::size_of::<MONITORINFO>() as UINT;
-
-    if GetMonitorInfoW(hmonitor, &mut monitor_info) != 0 {
-        let rect_ptr = lparam as *mut RECT;
-        let monitor_rect = monitor_info.rcMonitor;
-
-        (*rect_ptr).left = (*rect_ptr).left.min(monitor_rect.left);
-        (*rect_ptr).top = (*rect_ptr).top.min(monitor_rect.top);
-        (*rect_ptr).right = (*rect_ptr).right.max(monitor_rect.right);
-        (*rect_ptr).bottom = (*rect_ptr).bottom.max(monitor_rect.bottom);
-    }
-
-    1 // Continue enumeration
-}
-
-unsafe fn get_virtual_screen_rect(rect: &mut RECT) {
-    let mut monitor_info: MONITORINFO = std::mem::zeroed();
-    monitor_info.cbSize = std::mem::size_of::<MONITORINFO>() as UINT;
-
-    // Initialize the rect to cover at least one monitor
-    if GetMonitorInfoW(
-        MonitorFromWindow(null_mut(), MONITOR_DEFAULTTOPRIMARY),
-        &mut monitor_info,
-    ) != 0
-    {
-        *rect = monitor_info.rcMonitor;
-    }
-    // Enumerate all monitors and accumulate their dimensions
-    EnumDisplayMonitors(
-        null_mut(),
-        null_mut(),
-        Some(monitor_enum_proc),
-        rect as *mut RECT as LPARAM,
-    );
-}
 unsafe extern "system" fn raw_callback(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 && wparam as DWORD == WM_MOUSEMOVE {
+        let hook_struct = *(lparam as *const MSLLHOOKSTRUCT);
+
+        let global_hwnd = GLOBAL_HWND.lock().unwrap();
+        let hwnd = global_hwnd.0;
+        let mut callback_data =
+        Box::from_raw(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut CallbackData);
+        (callback_data.callback)(hook_struct.pt.x, hook_struct.pt.y, 'a');
+        Box::into_raw(callback_data);
         return 1;
     }
     CallNextHookEx(null_mut(), code, wparam, lparam)
 }
 
-fn block_input(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+fn start_input_interception(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     thread::spawn(move || unsafe {
         let hook_id: HHOOK = SetWindowsHookExA(
             WH_MOUSE_LL,
@@ -405,8 +289,8 @@ fn disable_throttling(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 #[neon::main]
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("disable_throttling", disable_throttling)?;
-    cx.export_function("start_raw_input", start_raw_input)?;
-    cx.export_function("block_input", block_input)?;
+    cx.export_function("set_callback", set_callback)?;
+    cx.export_function("start_input_interception", start_input_interception)?;
     cx.export_function("set_mouse_position", set_mouse_position)?;
     Ok(())
 }
